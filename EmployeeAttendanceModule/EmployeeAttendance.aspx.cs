@@ -2,61 +2,53 @@
 using System.Configuration;
 using System.Data;
 using System.Data.SqlClient;
+using System.Web.UI;
 using System.Web.UI.WebControls;
+using Microsoft.Reporting.WebForms;
 
 namespace EmployeeAttendanceModule
 {
     public partial class EmployeeAttendance : System.Web.UI.Page
     {
-        string conStr = ConfigurationManager.ConnectionStrings["conn"].ConnectionString;
+        private string connString = ConfigurationManager.ConnectionStrings["conn"].ConnectionString;
 
         protected void Page_Load(object sender, EventArgs e)
         {
             if (!IsPostBack)
             {
                 LoadGrid();
-                lblFormTitle.Text = "Employee Attendance Record";
+                btnUpdate.Visible = false;
+                lblMessage.Visible = false;
             }
         }
 
-        // Helper method for formatting time values in GridView
-        protected string FormatTime(object timeValue)
+        private void LoadGrid(string employeeId = null, DateTime? date = null)
         {
-            if (timeValue == null || timeValue == DBNull.Value)
-                return "N/A";
-
-            try
+            using (SqlConnection con = new SqlConnection(connString))
             {
-                // If stored as TimeSpan
-                if (timeValue is TimeSpan timeSpan)
-                {
-                    return timeSpan.ToString(@"hh\:mm");
-                }
+                string query = "SELECT * FROM EmployeeAttendance WHERE 1=1";
 
-                // If stored as DateTime
-                if (timeValue is DateTime dateTime)
-                {
-                    return dateTime.ToString("HH:mm");
-                }
+                if (!string.IsNullOrEmpty(employeeId))
+                    query += " AND EmployeeID = @EmployeeID";
 
-                // If stored as string, try to parse
-                string timeStr = timeValue.ToString();
-                if (TimeSpan.TryParse(timeStr, out TimeSpan parsedTimeSpan))
-                {
-                    return parsedTimeSpan.ToString(@"hh\:mm");
-                }
+                if (date.HasValue)
+                    query += " AND AttendanceDate = @AttendanceDate";
 
-                if (DateTime.TryParse(timeStr, out DateTime parsedDateTime))
-                {
-                    return parsedDateTime.ToString("HH:mm");
-                }
+                SqlCommand cmd = new SqlCommand(query, con);
 
-                // Return as-is if can't parse
-                return timeStr;
-            }
-            catch (Exception)
-            {
-                return timeValue.ToString();
+                if (!string.IsNullOrEmpty(employeeId))
+                    cmd.Parameters.Add("@EmployeeID", SqlDbType.NVarChar, 50).Value = employeeId;
+
+                if (date.HasValue)
+                    cmd.Parameters.Add("@AttendanceDate", SqlDbType.Date).Value = date.Value.Date;
+
+                SqlDataAdapter da = new SqlDataAdapter(cmd);
+                DataTable dt = new DataTable();
+
+                da.Fill(dt);
+
+                gvAttendance.DataSource = dt;
+                gvAttendance.DataBind();
             }
         }
 
@@ -64,98 +56,341 @@ namespace EmployeeAttendanceModule
         {
             if (Page.IsValid)
             {
-                if (!DateTime.TryParse(txtDate.Text, out DateTime date))
+                if (!CheckOverlap(txtEmployeeID.Text.Trim(), txtDate.Text.Trim(), txtTimeIn.Text.Trim(), txtTimeOut.Text.Trim(), null))
                 {
-                    ShowMessage("Invalid date format. Please enter a valid date.");
+                    lblMessage.Text = "Attendance record overlaps with existing entries.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
                     return;
                 }
 
-                if (!TimeSpan.TryParse(txtTimeIn.Text, out TimeSpan timeIn))
+                if (!DateTime.TryParse(txtDate.Text.Trim(), out DateTime attendanceDate) ||
+                    !TimeSpan.TryParse(txtTimeIn.Text.Trim(), out TimeSpan timeIn) ||
+                    !TimeSpan.TryParse(txtTimeOut.Text.Trim(), out TimeSpan timeOut))
                 {
-                    ShowMessage("Invalid Time In format. Please use HH:mm format.");
+                    lblMessage.Text = "Invalid date or time format.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
                     return;
                 }
 
-                if (!TimeSpan.TryParse(txtTimeOut.Text, out TimeSpan timeOut))
+                using (SqlConnection con = new SqlConnection(connString))
                 {
-                    ShowMessage("Invalid Time Out format. Please use HH:mm format.");
-                    return;
-                }
-
-                using (SqlConnection con = new SqlConnection(conStr))
-                {
-                    // Fixed column name from 'Date' to 'AttendanceDate' to match your ASPX
-                    string query = @"INSERT INTO EmployeeAttendance (EmployeeID, EmployeeName, AttendanceDate, TimeIn, TimeOut, Remarks)
+                    string query = @"INSERT INTO EmployeeAttendance 
+                                     (EmployeeID, EmployeeName, AttendanceDate, TimeIn, TimeOut, Remarks) 
                                      VALUES (@EmployeeID, @EmployeeName, @AttendanceDate, @TimeIn, @TimeOut, @Remarks)";
+
                     SqlCommand cmd = new SqlCommand(query, con);
-                    cmd.Parameters.AddWithValue("@EmployeeID", txtEmployeeID.Text.Trim());
-                    cmd.Parameters.AddWithValue("@EmployeeName", txtEmployeeName.Text.Trim());
-                    cmd.Parameters.AddWithValue("@AttendanceDate", date);
-                    cmd.Parameters.AddWithValue("@TimeIn", timeIn);
-                    cmd.Parameters.AddWithValue("@TimeOut", timeOut);
-                    cmd.Parameters.AddWithValue("@Remarks", txtRemarks.Text.Trim());
+                    cmd.Parameters.Add("@EmployeeID", SqlDbType.NVarChar, 50).Value = txtEmployeeID.Text.Trim();
+                    cmd.Parameters.Add("@EmployeeName", SqlDbType.NVarChar, 100).Value = txtEmployeeName.Text.Trim();
+                    cmd.Parameters.Add("@AttendanceDate", SqlDbType.Date).Value = attendanceDate.Date;
+                    cmd.Parameters.Add("@TimeIn", SqlDbType.Time).Value = timeIn;
+                    cmd.Parameters.Add("@TimeOut", SqlDbType.Time).Value = timeOut;
+                    cmd.Parameters.Add("@Remarks", SqlDbType.NVarChar, 255).Value = txtRemarks.Text.Trim();
 
                     con.Open();
                     cmd.ExecuteNonQuery();
+                    con.Close();
                 }
 
-                ShowMessage("Attendance record saved successfully.", false);
                 ClearForm();
                 LoadGrid();
+                lblMessage.Text = "Record saved successfully.";
+                lblMessage.ForeColor = System.Drawing.Color.Green;
+                lblMessage.Visible = true;
             }
         }
+
+        protected string FormatTime(object timeObj)
+        {
+            if (timeObj == null || timeObj == DBNull.Value)
+                return "N/A";
+
+            if (timeObj is TimeSpan ts)
+            {
+                // Format TimeSpan as HH:mm
+                return ts.ToString(@"hh\:mm");
+            }
+
+            // In case time is stored as DateTime or string, try to parse and format:
+            if (TimeSpan.TryParse(timeObj.ToString(), out var parsedTime))
+            {
+                return parsedTime.ToString(@"hh\:mm");
+            }
+
+            if (DateTime.TryParse(timeObj.ToString(), out var dt))
+            {
+                return dt.ToString("HH:mm");
+            }
+
+            return "N/A";
+        }
+
 
         protected void btnUpdate_Click(object sender, EventArgs e)
         {
             if (Page.IsValid)
             {
-                if (!DateTime.TryParse(txtDate.Text, out DateTime date))
+                if (!int.TryParse(hiddenAttendanceID.Value, out int id))
                 {
-                    ShowMessage("Invalid date format. Please enter a valid date.");
+                    lblMessage.Text = "Invalid record ID.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
                     return;
                 }
 
-                if (!TimeSpan.TryParse(txtTimeIn.Text, out TimeSpan timeIn))
+                if (!CheckOverlap(txtEmployeeID.Text.Trim(), txtDate.Text.Trim(), txtTimeIn.Text.Trim(), txtTimeOut.Text.Trim(), id))
                 {
-                    ShowMessage("Invalid Time In format. Please use HH:mm format.");
+                    lblMessage.Text = "Attendance record overlaps with existing entries.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
                     return;
                 }
 
-                if (!TimeSpan.TryParse(txtTimeOut.Text, out TimeSpan timeOut))
+                if (!DateTime.TryParse(txtDate.Text.Trim(), out DateTime attendanceDate) ||
+                    !TimeSpan.TryParse(txtTimeIn.Text.Trim(), out TimeSpan timeIn) ||
+                    !TimeSpan.TryParse(txtTimeOut.Text.Trim(), out TimeSpan timeOut))
                 {
-                    ShowMessage("Invalid Time Out format. Please use HH:mm format.");
+                    lblMessage.Text = "Invalid date or time format.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
                     return;
                 }
 
-                using (SqlConnection con = new SqlConnection(conStr))
+                using (SqlConnection con = new SqlConnection(connString))
                 {
-                    // Fixed column name from 'Date' to 'AttendanceDate'
-                    string query = @"UPDATE EmployeeAttendance 
-                                     SET EmployeeID = @EmployeeID, EmployeeName = @EmployeeName, AttendanceDate = @AttendanceDate, 
-                                         TimeIn = @TimeIn, TimeOut = @TimeOut, Remarks = @Remarks 
+                    string query = @"UPDATE EmployeeAttendance SET 
+                                     EmployeeID = @EmployeeID, 
+                                     EmployeeName = @EmployeeName, 
+                                     AttendanceDate = @AttendanceDate, 
+                                     TimeIn = @TimeIn, 
+                                     TimeOut = @TimeOut, 
+                                     Remarks = @Remarks 
                                      WHERE ID = @ID";
+
                     SqlCommand cmd = new SqlCommand(query, con);
-                    cmd.Parameters.AddWithValue("@EmployeeID", txtEmployeeID.Text.Trim());
-                    cmd.Parameters.AddWithValue("@EmployeeName", txtEmployeeName.Text.Trim());
-                    cmd.Parameters.AddWithValue("@AttendanceDate", date);
-                    cmd.Parameters.AddWithValue("@TimeIn", timeIn);
-                    cmd.Parameters.AddWithValue("@TimeOut", timeOut);
-                    cmd.Parameters.AddWithValue("@Remarks", txtRemarks.Text.Trim());
-                    cmd.Parameters.AddWithValue("@ID", hiddenAttendanceID.Value);
+                    cmd.Parameters.Add("@EmployeeID", SqlDbType.NVarChar, 50).Value = txtEmployeeID.Text.Trim();
+                    cmd.Parameters.Add("@EmployeeName", SqlDbType.NVarChar, 100).Value = txtEmployeeName.Text.Trim();
+                    cmd.Parameters.Add("@AttendanceDate", SqlDbType.Date).Value = attendanceDate.Date;
+                    cmd.Parameters.Add("@TimeIn", SqlDbType.Time).Value = timeIn;
+                    cmd.Parameters.Add("@TimeOut", SqlDbType.Time).Value = timeOut;
+                    cmd.Parameters.Add("@Remarks", SqlDbType.NVarChar, 255).Value = txtRemarks.Text.Trim();
+                    cmd.Parameters.Add("@ID", SqlDbType.Int).Value = id;
 
                     con.Open();
                     cmd.ExecuteNonQuery();
+                    con.Close();
                 }
 
-                ShowMessage("Attendance record updated successfully.", false);
                 ClearForm();
                 LoadGrid();
+                btnSave.Visible = true;
+                btnUpdate.Visible = false;
+                lblMessage.Text = "Record updated successfully.";
+                lblMessage.ForeColor = System.Drawing.Color.Green;
+                lblMessage.Visible = true;
             }
         }
 
         protected void btnCancel_Click(object sender, EventArgs e)
         {
             ClearForm();
+            btnSave.Visible = true;
+            btnUpdate.Visible = false;
+            lblMessage.Visible = false;
+        }
+
+        protected void gvAttendance_RowCommand(object sender, GridViewCommandEventArgs e)
+        {
+            if (e.CommandName == "EditRecord" || e.CommandName == "DeleteRecord")
+            {
+                if (int.TryParse(e.CommandArgument.ToString(), out int rowIndex))
+                {
+                    // Ensure rowIndex is within range
+                    if (rowIndex >= 0 && rowIndex < gvAttendance.DataKeys.Count)
+                    {
+                        int id = Convert.ToInt32(gvAttendance.DataKeys[rowIndex].Value);
+
+                        if (e.CommandName == "EditRecord")
+                        {
+                            LoadRecordForEdit(id);
+                        }
+                        else if (e.CommandName == "DeleteRecord")
+                        {
+                            DeleteRecord(id);
+                        }
+                    }
+                    else
+                    {
+                        lblMessage.Text = "Invalid row selection.";
+                        lblMessage.ForeColor = System.Drawing.Color.Red;
+                        lblMessage.Visible = true;
+                    }
+                }
+                else
+                {
+                    lblMessage.Text = "Invalid command argument.";
+                    lblMessage.ForeColor = System.Drawing.Color.Red;
+                    lblMessage.Visible = true;
+                }
+            }
+        }
+
+        protected void gvAttendance_RowDataBound(object sender, GridViewRowEventArgs e)
+        {
+            if (e.Row.RowType == DataControlRowType.DataRow)
+            {
+                if (TimeSpan.TryParse(DataBinder.Eval(e.Row.DataItem, "TimeIn")?.ToString(), out TimeSpan timeIn) &&
+                    TimeSpan.TryParse(DataBinder.Eval(e.Row.DataItem, "TimeOut")?.ToString(), out TimeSpan timeOut))
+                {
+                    TimeSpan lateThreshold = new TimeSpan(9, 0, 0); // 9:00 AM
+                    TimeSpan earlyThreshold = new TimeSpan(17, 0, 0); // 5:00 PM
+
+                    if (timeIn > lateThreshold)
+                    {
+                        e.Row.Cells[4].BackColor = System.Drawing.Color.LightCoral; // Highlight TimeIn cell
+                    }
+
+                    if (timeOut < earlyThreshold)
+                    {
+                        e.Row.Cells[5].BackColor = System.Drawing.Color.LightYellow; // Highlight TimeOut cell
+                    }
+                }
+            }
+        }
+
+        private void LoadRecordForEdit(int id)
+        {
+            using (SqlConnection con = new SqlConnection(connString))
+            {
+                string query = "SELECT * FROM EmployeeAttendance WHERE ID = @ID";
+                SqlCommand cmd = new SqlCommand(query, con);
+                cmd.Parameters.Add("@ID", SqlDbType.Int).Value = id;
+
+                con.Open();
+                using (SqlDataReader reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        txtEmployeeID.Text = reader["EmployeeID"].ToString();
+                        txtEmployeeName.Text = reader["EmployeeName"].ToString();
+                        txtDate.Text = Convert.ToDateTime(reader["AttendanceDate"]).ToString("yyyy-MM-dd");
+                        txtTimeIn.Text = ((TimeSpan)reader["TimeIn"]).ToString(@"hh\:mm");
+                        txtTimeOut.Text = ((TimeSpan)reader["TimeOut"]).ToString(@"hh\:mm");
+                        txtRemarks.Text = reader["Remarks"].ToString();
+
+                        hiddenAttendanceID.Value = id.ToString();
+                    }
+                }
+                con.Close();
+            }
+
+            btnSave.Visible = false;
+            btnUpdate.Visible = true;
+            lblMessage.Visible = false;
+        }
+
+        private void DeleteRecord(int id)
+        {
+            using (SqlConnection con = new SqlConnection(connString))
+            {
+                string query = "DELETE FROM EmployeeAttendance WHERE ID = @ID";
+                SqlCommand cmd = new SqlCommand(query, con);
+                cmd.Parameters.Add("@ID", SqlDbType.Int).Value = id;
+
+                con.Open();
+                cmd.ExecuteNonQuery();
+                con.Close();
+            }
+
+            LoadGrid();
+            lblMessage.Text = "Record deleted successfully.";
+            lblMessage.ForeColor = System.Drawing.Color.Green;
+            lblMessage.Visible = true;
+        }
+
+        protected void btnSearch_Click(object sender, EventArgs e)
+        {
+            string empId = txtSearchEmployeeID.Text.Trim();
+            DateTime? date = null;
+            if (DateTime.TryParse(txtSearchDate.Text.Trim(), out DateTime dt))
+                date = dt;
+
+            gvAttendance.PageIndex = 0; // Reset to first page on search
+            LoadGrid(empId == string.Empty ? null : empId, date);
+            lblMessage.Visible = false;
+        }
+
+        protected void btnShowAll_Click(object sender, EventArgs e)
+        {
+            txtSearchEmployeeID.Text = string.Empty;
+            txtSearchDate.Text = string.Empty;
+            gvAttendance.PageIndex = 0;
+            LoadGrid();
+            lblMessage.Visible = false;
+        }
+
+        protected void gvAttendance_PageIndexChanging(object sender, GridViewPageEventArgs e)
+        {
+            gvAttendance.PageIndex = e.NewPageIndex;
+            // Reload with current search filters if needed, else load all
+            string empId = txtSearchEmployeeID.Text.Trim();
+            DateTime? date = null;
+            if (DateTime.TryParse(txtSearchDate.Text.Trim(), out DateTime dt))
+                date = dt;
+
+            LoadGrid(empId == string.Empty ? null : empId, date);
+        }
+
+        protected void cvTimeOut_ServerValidate(object source, ServerValidateEventArgs args)
+        {
+            if (TimeSpan.TryParse(txtTimeIn.Text, out TimeSpan timeIn) &&
+                TimeSpan.TryParse(txtTimeOut.Text, out TimeSpan timeOut))
+            {
+                args.IsValid = timeOut > timeIn;
+            }
+            else
+            {
+                args.IsValid = false;
+            }
+        }
+
+        private bool CheckOverlap(string employeeId, string dateStr, string timeInStr, string timeOutStr, int? excludeId)
+        {
+            if (!DateTime.TryParse(dateStr, out DateTime date)) return false;
+            if (!TimeSpan.TryParse(timeInStr, out TimeSpan timeIn)) return false;
+            if (!TimeSpan.TryParse(timeOutStr, out TimeSpan timeOut)) return false;
+
+            using (SqlConnection con = new SqlConnection(connString))
+            {
+                string query = @"
+                    SELECT COUNT(*) FROM EmployeeAttendance 
+                    WHERE EmployeeID = @EmployeeID 
+                    AND AttendanceDate = @Date
+                    AND (@ExcludeID IS NULL OR ID != @ExcludeID)
+                    AND (
+                        (@TimeIn BETWEEN TimeIn AND TimeOut)
+                        OR (@TimeOut BETWEEN TimeIn AND TimeOut)
+                        OR (TimeIn BETWEEN @TimeIn AND @TimeOut)
+                        OR (TimeOut BETWEEN @TimeIn AND @TimeOut)
+                    )";
+
+                SqlCommand cmd = new SqlCommand(query, con);
+                cmd.Parameters.Add("@EmployeeID", SqlDbType.NVarChar, 50).Value = employeeId;
+                cmd.Parameters.Add("@Date", SqlDbType.Date).Value = date.Date;
+                cmd.Parameters.Add("@TimeIn", SqlDbType.Time).Value = timeIn;
+                cmd.Parameters.Add("@TimeOut", SqlDbType.Time).Value = timeOut;
+                if (excludeId.HasValue)
+                    cmd.Parameters.Add("@ExcludeID", SqlDbType.Int).Value = excludeId.Value;
+                else
+                    cmd.Parameters.Add("@ExcludeID", SqlDbType.Int).Value = DBNull.Value;
+
+                con.Open();
+                int count = (int)cmd.ExecuteScalar();
+                con.Close();
+
+                return count == 0;
+            }
         }
 
         private void ClearForm()
@@ -167,204 +402,80 @@ namespace EmployeeAttendanceModule
             txtTimeOut.Text = "";
             txtRemarks.Text = "";
             hiddenAttendanceID.Value = "";
-            btnSave.Visible = true;
-            btnUpdate.Visible = false;
-            lblFormTitle.Text = "Add New Attendance Record";
             lblMessage.Visible = false;
         }
 
-        private void LoadGrid(string filterQuery = "")
+        protected void btnGenerateReport_Click(object sender, EventArgs e)
         {
             try
             {
-                using (SqlConnection con = new SqlConnection(conStr))
+                // Fetch data to bind to report - adjust this method to your data fetching logic
+                DataTable dtAttendance = GetAttendanceDataForReport();
+
+                if (dtAttendance == null || dtAttendance.Rows.Count == 0)
                 {
-                    // Updated query with proper column names and NULL handling
-                    string query = @"SELECT 
-                                        ID,
-                                        ISNULL(EmployeeID, '') as EmployeeID,
-                                        ISNULL(EmployeeName, '') as EmployeeName,
-                                        AttendanceDate,
-                                        TimeIn,
-                                        TimeOut,
-                                        ISNULL(Remarks, '') as Remarks
-                                    FROM EmployeeAttendance";
-
-                    if (!string.IsNullOrEmpty(filterQuery))
-                        query += " WHERE " + filterQuery;
-
-                    query += " ORDER BY AttendanceDate DESC, EmployeeID";
-
-                    SqlDataAdapter da = new SqlDataAdapter(query, con);
-                    DataTable dt = new DataTable();
-                    da.Fill(dt);
-
-                    gvAttendance.DataSource = dt;
-                    gvAttendance.DataBind();
-
-                    if (dt.Rows.Count == 0)
-                    {
-                        ShowMessage("No records found.", false);
-                    }
-                    else
-                    {
-                        lblMessage.Visible = false;
-                    }
+                    lblMessage.Text = "No records to display in report.";
+                    lblMessage.Visible = true;
+                    ReportViewer1.Visible = false;
+                    return;
                 }
-            }
-            catch (FormatException ex)
-            {
-                ShowMessage("Format Error: " + ex.Message + ". Please check your data format.");
+
+                lblMessage.Visible = false;
+                ReportViewer1.Visible = true;
+
+                ReportViewer1.Reset();
+                ReportViewer1.ProcessingMode = ProcessingMode.Local;
+                ReportViewer1.LocalReport.ReportPath = Server.MapPath("Report1.rdlc");
+
+                // Clear previous data sources
+                ReportViewer1.LocalReport.DataSources.Clear();
+
+                // Provide the data source for the report
+                ReportDataSource rds = new ReportDataSource("DataSet1", dtAttendance);
+                ReportViewer1.LocalReport.DataSources.Add(rds);
+
+                ReportViewer1.LocalReport.Refresh();
             }
             catch (Exception ex)
             {
-                ShowMessage("Error loading data: " + ex.Message);
+                lblMessage.Text = "Error generating report: " + ex.Message;
+                lblMessage.Visible = true;
+                ReportViewer1.Visible = false;
             }
         }
 
-        protected void btnSearch_Click(object sender, EventArgs e)
+        // Example method to fetch data for the report (replace with your actual data access)
+        private DataTable GetAttendanceDataForReport()
         {
-            string filter = "";
+            DataTable dt = new DataTable();
 
-            if (!string.IsNullOrWhiteSpace(txtSearchEmployeeID.Text))
-                filter += $"EmployeeID LIKE '%{txtSearchEmployeeID.Text.Trim()}%'";
-
-            if (!string.IsNullOrWhiteSpace(txtSearchDate.Text))
+            // Assuming you have a method GetConnection() returning SqlConnection
+            using (SqlConnection con = GetConnection())
             {
-                if (!string.IsNullOrEmpty(filter))
-                    filter += " AND ";
+                string query = "SELECT ID, EmployeeID, EmployeeName, AttendanceDate, TimeIn, TimeOut, Remarks FROM EmployeeAttendance";
 
-                if (DateTime.TryParse(txtSearchDate.Text, out DateTime searchDate))
+                using (SqlCommand cmd = new SqlCommand(query, con))
                 {
-                    // Fixed column name from 'Date' to 'AttendanceDate'
-                    filter += $"AttendanceDate = '{searchDate:yyyy-MM-dd}'";
-                }
-                else
-                {
-                    ShowMessage("Invalid search date format.");
-                    return;
-                }
-            }
-
-            LoadGrid(filter);
-        }
-
-        protected void btnShowAll_Click(object sender, EventArgs e)
-        {
-            txtSearchEmployeeID.Text = "";
-            txtSearchDate.Text = "";
-            LoadGrid();
-        }
-
-        protected void gvAttendance_RowCommand(object sender, GridViewCommandEventArgs e)
-        {
-            if (e.CommandName == "EditRecord")
-            {
-                int rowIndex = Convert.ToInt32(e.CommandArgument);
-                GridViewRow row = gvAttendance.Rows[rowIndex];
-
-                hiddenAttendanceID.Value = gvAttendance.DataKeys[rowIndex].Value.ToString();
-
-                // Get values safely to avoid format exceptions
-                txtEmployeeID.Text = GetCellText(row.Cells[1]);
-                txtEmployeeName.Text = GetCellText(row.Cells[2]);
-
-                // Get date from the TemplateField
-                Label lblDate = (Label)row.FindControl("lblDate");
-                if (lblDate != null)
-                {
-                    txtDate.Text = lblDate.Text;
-                }
-
-                // Get time values - they're now in TemplateFields, so we need to get them from DataKeys or re-query
-                DataTable dt = GetRecordById(Convert.ToInt32(hiddenAttendanceID.Value));
-                if (dt.Rows.Count > 0)
-                {
-                    DataRow dataRow = dt.Rows[0];
-
-                    // Format time values properly
-                    if (dataRow["TimeIn"] != DBNull.Value)
+                    using (SqlDataAdapter da = new SqlDataAdapter(cmd))
                     {
-                        if (dataRow["TimeIn"] is TimeSpan timeIn)
-                            txtTimeIn.Text = timeIn.ToString(@"hh\:mm");
-                        else
-                            txtTimeIn.Text = dataRow["TimeIn"].ToString();
+                        da.Fill(dt);
                     }
-
-                    if (dataRow["TimeOut"] != DBNull.Value)
-                    {
-                        if (dataRow["TimeOut"] is TimeSpan timeOut)
-                            txtTimeOut.Text = timeOut.ToString(@"hh\:mm");
-                        else
-                            txtTimeOut.Text = dataRow["TimeOut"].ToString();
-                    }
-
-                    txtRemarks.Text = dataRow["Remarks"].ToString();
                 }
-
-                btnSave.Visible = false;
-                btnUpdate.Visible = true;
-                lblFormTitle.Text = "Edit Attendance Record";
-                lblMessage.Visible = false;
             }
-            else if (e.CommandName == "DeleteRecord")
-            {
-                int id = Convert.ToInt32(e.CommandArgument);
 
-                using (SqlConnection con = new SqlConnection(conStr))
-                {
-                    string query = "DELETE FROM EmployeeAttendance WHERE ID = @ID";
-                    SqlCommand cmd = new SqlCommand(query, con);
-                    cmd.Parameters.AddWithValue("@ID", id);
-
-                    con.Open();
-                    cmd.ExecuteNonQuery();
-                }
-
-                ShowMessage("Record deleted successfully.", false);
-                LoadGrid();
-            }
+            return dt;
         }
 
-        // Helper method to get cell text safely
-        private string GetCellText(TableCell cell)
+        // Example SqlConnection method (adjust connection string accordingly)
+        private SqlConnection GetConnection()
         {
-            return cell.Text == "&nbsp;" ? "" : cell.Text;
+            string connStr = ConfigurationManager.ConnectionStrings["conn"].ConnectionString;
+            return new SqlConnection(connStr);
         }
 
-        // Helper method to get a specific record by ID
-        private DataTable GetRecordById(int id)
+        protected void gvAttendance_SelectedIndexChanged(object sender, EventArgs e)
         {
-            using (SqlConnection con = new SqlConnection(conStr))
-            {
-                string query = "SELECT * FROM EmployeeAttendance WHERE ID = @ID";
-                SqlCommand cmd = new SqlCommand(query, con);
-                cmd.Parameters.AddWithValue("@ID", id);
 
-                SqlDataAdapter da = new SqlDataAdapter(cmd);
-                DataTable dt = new DataTable();
-                da.Fill(dt);
-                return dt;
-            }
-        }
-
-        protected void cvTimeOut_ServerValidate(object source, ServerValidateEventArgs args)
-        {
-            if (TimeSpan.TryParse(txtTimeIn.Text, out TimeSpan timeIn) && TimeSpan.TryParse(txtTimeOut.Text, out TimeSpan timeOut))
-            {
-                args.IsValid = timeOut > timeIn;
-            }
-            else
-            {
-                args.IsValid = false;
-            }
-        }
-
-        private void ShowMessage(string message, bool isError = true)
-        {
-            lblMessage.Text = message;
-            lblMessage.ForeColor = isError ? System.Drawing.Color.Red : System.Drawing.Color.Green;
-            lblMessage.Visible = true;
         }
     }
 }
